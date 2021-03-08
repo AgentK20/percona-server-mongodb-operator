@@ -157,7 +157,7 @@ func (r *ReconcilePerconaServerMongoDB) createSSLByCertManager(cr *api.PerconaSe
 			DNSNames:     certificateDNSNames,
 			IsCA:         true,
 			IssuerRef: cmmeta.ObjectReference{
-				Name: issuerName,
+				Name: certificateAuthorityIssuer,
 				Kind: issuerKind,
 			},
 		},
