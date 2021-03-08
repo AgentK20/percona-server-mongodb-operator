@@ -45,7 +45,7 @@ func (r *ReconcilePerconaServerMongoDB) reconsileSSL(cr *api.PerconaServerMongoD
 
 func (r *ReconcilePerconaServerMongoDB) createSSLByCertManager(cr *api.PerconaServerMongoDB) error {
 	issuerKind := "Issuer"
-	issuerName := cr.Name + "-psmdb-ca"
+	issuerName := cr.Name + "-psmdb-ca-selfsign"
 	certificateDNSNames := []string{"localhost"}
 
 	for _, replset := range cr.Spec.Replsets {
@@ -57,6 +57,7 @@ func (r *ReconcilePerconaServerMongoDB) createSSLByCertManager(cr *api.PerconaSe
 		return err
 	}
 	ownerReferences := []metav1.OwnerReference{owner}
+	// First, we create the issuer that will issue our CA.
 	err = r.client.Create(context.TODO(), &cm.Issuer{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            issuerName,
@@ -70,9 +71,54 @@ func (r *ReconcilePerconaServerMongoDB) createSSLByCertManager(cr *api.PerconaSe
 		},
 	})
 	if err != nil && !k8serrors.IsAlreadyExists(err) {
-		return fmt.Errorf("create issuer: %v", err)
+		return fmt.Errorf("create selfsign issuer: %v", err)
 	}
 
+	// Second, we create our CA
+	certificateAuthorityIssuer := cr.Name + "-psmdb-ca"
+	certificateAuthoritySecret := cr.Name + "-psmdb-ca-secret"
+	err = r.client.Create(context.TODO(), &cm.Certificate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            certificateAuthorityIssuer,
+			Namespace:       cr.Namespace,
+			OwnerReferences: ownerReferences,
+		},
+		Spec: cm.CertificateSpec{
+			Organization: []string{"PSMDB"},
+			CommonName:   cr.Name + "-ca",
+			IsCA:         true,
+			IssuerRef: cmmeta.ObjectReference{
+				Name: issuerName,
+				Kind: issuerKind,
+			},
+			SecretName: certificateAuthoritySecret,
+		},
+	})
+
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create ca cert: %v", err)
+	}
+
+	// Thirdly, we create a second issuer based on our CA
+	err = r.client.Create(context.TODO(), &cm.Issuer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            certificateAuthorityIssuer,
+			Namespace:       cr.Namespace,
+			OwnerReferences: ownerReferences,
+		},
+		Spec: cm.IssuerSpec{
+			IssuerConfig: cm.IssuerConfig{
+				CA: &cm.CAIssuer{
+					SecretName: certificateAuthoritySecret,
+				},
+			},
+		},
+	})
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create ca issuer: %v", err)
+	}
+
+	// Lastly, create our certificate issued by our CA
 	err = r.client.Create(context.TODO(), &cm.Certificate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            cr.Name + "-ssl",
@@ -86,7 +132,7 @@ func (r *ReconcilePerconaServerMongoDB) createSSLByCertManager(cr *api.PerconaSe
 			DNSNames:     certificateDNSNames,
 			IsCA:         true,
 			IssuerRef: cmmeta.ObjectReference{
-				Name: issuerName,
+				Name: certificateAuthorityIssuer,
 				Kind: issuerKind,
 			},
 		},
